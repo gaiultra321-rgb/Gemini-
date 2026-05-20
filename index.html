@@ -3,20 +3,25 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Gemini Live Audio</title>
+    <title>Gemini Mobile Live Debug</title>
     <style>
-        body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
-        button { padding: 15px 30px; font-size: 20px; cursor: pointer; border-radius: 8px; border: none; }
-        #startBtn { background-color: #4CAF50; color: white; }
-        #stopBtn { background-color: #f44336; color: white; display: none; margin-left: 10px; }
+        body { font-family: Arial, sans-serif; text-align: center; padding: 20px; background-color: #f4f6f9; }
+        button { padding: 18px 36px; font-size: 20px; cursor: pointer; border-radius: 50px; border: none; font-weight: bold; margin-top: 10px; }
+        #startBtn { background-color: #007bff; color: white; }
+        #stopBtn { background-color: #dc3545; color: white; display: none; }
+        #status { font-size: 18px; margin-top: 15px; color: #444; font-weight: bold; }
+        /* লগ বক্সের স্টাইল */
+        #terminal { text-align: left; background: #1e1e1e; color: #00ff00; padding: 15px; font-family: monospace; font-size: 12px; border-radius: 8px; height: 200px; overflow-y: auto; margin-top: 20px; box-shadow: inset 0 0 10px #000; }
     </style>
 </head>
 <body>
 
-    <h1>Gemini Live Voice</h1>
+    <h1>Gemini Voice (Debug Version)</h1>
     <button id="startBtn">Start Talking</button>
-    <button id="stopBtn">Stop</button>
+    <button id="stopBtn">Stop Conversation</button>
     <p id="status">Status: Waiting...</p>
+    
+    <div id="terminal">--- Live Terminal Logs ---<br></div>
 
     <script>
         let ws;
@@ -27,64 +32,100 @@
         const startBtn = document.getElementById('startBtn');
         const stopBtn = document.getElementById('stopBtn');
         const statusTxt = document.getElementById('status');
+        const terminal = document.getElementById('terminal');
+
+        // স্ক্রিনে লগ প্রিন্ট করার ফাংশন
+        function log(msg, isError = false) {
+            const color = isError ? 'red' : '#00ff00';
+            terminal.innerHTML += `<span style="color: ${color}">[${new Date().toLocaleTimeString()}] ${msg}</span><br>`;
+            terminal.scrollTop = terminal.scrollHeight; // স্ক্রল অটো নিচে নামবে
+        }
 
         startBtn.onclick = async () => {
-            // ১. ব্যাকএন্ডের সাথে WebSocket কানেক্ট করা
-            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
-            
-            ws.onopen = async () => {
-                statusTxt.innerText = "Status: Connected! Speak now.";
-                startBtn.style.display = 'none';
-                stopBtn.style.display = 'inline-block';
-                await startMicrophone();
-            };
+            log("Initializing AudioContext...");
+            audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+            if (audioContext.state === 'suspended') {
+                await audioContext.resume();
+            }
 
-            ws.onmessage = async (event) => {
-                // Gemini থেকে আসা অডিও প্লে করা
-                const response = JSON.parse(event.data);
-                if (response.serverContent && response.serverContent.modelTurn) {
-                    const parts = response.serverContent.modelTurn.parts;
-                    parts.forEach(part => {
-                        if (part.inlineData && part.inlineData.data) {
-                            playAudio(part.inlineData.data);
-                        }
-                    });
-                }
-            };
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/ws`;
+            log(`Connecting to WebSocket: ${wsUrl}`);
+            
+            try {
+                ws = new WebSocket(wsUrl);
+                
+                ws.onopen = async () => {
+                    log("Connected to Backend Server successfully!");
+                    statusTxt.innerText = "Connected! Setting up Mic...";
+                    try {
+                        log("Requesting Microphone Permission...");
+                        await startMicrophone();
+                        log("Microphone active and streaming PCM audio.");
+                        statusTxt.innerText = "Live! Start speaking now.";
+                        startBtn.style.display = 'none';
+                        stopBtn.style.display = 'inline-block';
+                    } catch (micError) {
+                        log(`Mic Error: ${micError.message}`, true);
+                        statusTxt.innerText = "Mic Error!";
+                        ws.close();
+                    }
+                };
+
+                ws.onmessage = async (event) => {
+                    const response = JSON.parse(event.data);
+                    
+                    if (response.error) {
+                        log(`Server Side Error: ${response.error}`, true);
+                        return;
+                    }
+
+                    if (response.serverContent && response.serverContent.modelTurn) {
+                        log("Receiving audio chunk from Gemini...");
+                        const parts = response.serverContent.modelTurn.parts;
+                        parts.forEach(part => {
+                            if (part.inlineData && part.inlineData.data) {
+                                playAudio(part.inlineData.data);
+                            }
+                        });
+                    }
+                };
+
+                ws.onerror = (e) => log("WebSocket Error! Check if server is alive.", true);
+                ws.onclose = (e) => {
+                    log(`WebSocket Closed. Code: ${e.code}, Reason: ${e.reason || 'None'}`);
+                    statusTxt.innerText = "Status: Disconnected.";
+                    startBtn.style.display = 'inline-block';
+                    stopBtn.style.display = 'none';
+                };
+
+            } catch (e) {
+                log(`Failed to initialize: ${e.message}`, true);
+            }
         };
 
         stopBtn.onclick = () => {
+            log("Stopping conversation...");
             if (ws) ws.close();
             if (mediaStream) mediaStream.getTracks().forEach(track => track.stop());
             if (processor) processor.disconnect();
             if (audioContext) audioContext.close();
-            
-            statusTxt.innerText = "Status: Disconnected.";
-            startBtn.style.display = 'inline-block';
-            stopBtn.style.display = 'none';
         };
 
         async function startMicrophone() {
-            audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-            mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            mediaStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true } });
             const source = audioContext.createMediaStreamSource(mediaStream);
-            
-            // অডিও ক্যাপচার প্রসেসর
             processor = audioContext.createScriptProcessor(4096, 1, 1);
             source.connect(processor);
             processor.connect(audioContext.destination);
 
             processor.onaudioprocess = (e) => {
-                if (ws.readyState === WebSocket.OPEN) {
+                if (ws && ws.readyState === WebSocket.OPEN) {
                     const inputData = e.inputBuffer.getChannelData(0);
-                    // Float32 থেকে Int16 (PCM) এ কনভার্ট করা
                     const pcmData = new Int16Array(inputData.length);
                     for (let i = 0; i < inputData.length; i++) {
                         pcmData[i] = Math.max(-1, Math.min(1, inputData[i])) * 32767;
                     }
-                    
-                    // Base64 এ এনকোড করে পাঠানো
                     const base64Audio = btoa(String.fromCharCode(...new Uint8Array(pcmData.buffer)));
                     ws.send(JSON.stringify({
                         realtimeInput: { mediaChunks: [{ mimeType: "audio/pcm;rate=16000", data: base64Audio }] }
@@ -94,6 +135,7 @@
         }
 
         function playAudio(base64Data) {
+            if (!audioContext) return;
             const binaryStr = atob(base64Data);
             const len = binaryStr.length;
             const bytes = new Uint8Array(len);
@@ -109,5 +151,4 @@
         }
     </script>
 </body>
-  </html>
-  
+</html>
